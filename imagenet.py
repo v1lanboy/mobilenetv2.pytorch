@@ -190,6 +190,10 @@ def main():
     elif args.data_backend == 'dali-cpu':
         get_train_loader = get_dali_train_loader(dali_cpu=True)
         get_val_loader = get_dali_val_loader()
+    elif args.data_backend == 'pytorch-imagedepth':
+        depth_image = True if "ILSVRC_DEPTH" in args.data else False
+        get_train_loader = get_pytorch_imagedepth_train_loader(depth_image)
+        get_val_loader = get_pytorch_imagedepth_val_loader(depth_image)
 
     train_loader, train_loader_len = get_train_loader(args.data, args.batch_size, workers=args.workers, input_size=args.input_size)
     val_loader, val_loader_len = get_val_loader(args.data, args.batch_size, workers=args.workers, input_size=args.input_size)

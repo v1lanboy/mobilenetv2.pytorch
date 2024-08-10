@@ -4,7 +4,7 @@ import numpy as np
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 
-DATA_BACKEND_CHOICES = ['pytorch']
+DATA_BACKEND_CHOICES = ['pytorch', 'pytorch-imagedepth']
 try:
     from nvidia.dali.plugin.pytorch import DALIClassificationIterator
     from nvidia.dali.pipeline import Pipeline
@@ -169,12 +169,11 @@ def fast_collate(batch):
     tensor = torch.zeros( (len(imgs), 3, h, w), dtype=torch.uint8 )
     for i, img in enumerate(imgs):
         nump_array = np.asarray(img, dtype=np.uint8)
-        tens = torch.from_numpy(nump_array)
         if(nump_array.ndim < 3):
             nump_array = np.expand_dims(nump_array, axis=-1)
         nump_array = np.rollaxis(nump_array, 2)
-
-        tensor[i] += torch.from_numpy(nump_array)
+        copy_array = np.copy(nump_array)
+        tensor[i] += torch.from_numpy(copy_array)
 
     return tensor, targets
 
@@ -189,8 +188,8 @@ class PrefetchedWrapper(object):
 
         for next_input, next_target in loader:
             with torch.cuda.stream(stream):
-                next_input = next_input.cuda(async=True)
-                next_target = next_target.cuda(async=True)
+                next_input = next_input.cuda(non_blocking=True)
+                next_target = next_target.cuda(non_blocking=True)
                 next_input = next_input.float()
                 next_input = next_input.sub_(mean).div_(std)
 
@@ -259,3 +258,129 @@ def get_pytorch_val_loader(data_path, batch_size, workers=5, _worker_init_fn=Non
             collate_fn=fast_collate)
 
     return PrefetchedWrapper(val_loader), len(val_loader)
+
+###Here starts custom code by Ville Vianto
+import os
+from torch.utils.data import Dataset
+from PIL import Image, ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+import json
+
+class ImageNetDataset(Dataset):
+    def __init__(self, root, split, transform=None):
+        self.samples = []
+        self.targets = []
+        self.transform = transform
+        self.syn_to_class = {}
+        self.root = root
+        self.samples_dir = None
+
+        self._load_jsons()
+        
+        if split == "val":
+            self.samples_dir = os.path.join(self.root, "Data/CLS-LOC/val")
+            for entry in os.listdir(self.samples_dir):
+                syn_id = self.val_to_syn[entry]
+                target = self.syn_to_class[syn_id]
+                sample_path = os.path.join(self.samples_dir, entry)
+                self.samples.append(sample_path)
+                self.targets.append(target)
+        
+        elif split == "train":
+            self.samples_dir = os.path.join(self.root, "Data/CLS-LOC/train")
+            for entry in os.listdir(self.samples_dir):
+                syn_id = entry
+                target = self.syn_to_class[syn_id]
+                syn_folder = os.path.join(self.samples_dir, syn_id)
+                for sample in os.listdir(syn_folder):
+                    sample_path = os.path.join(syn_folder, sample)
+                    self.samples.append(sample_path)
+                    self.targets.append(target)
+        else:
+            raise ValueError("Inserted wrong split, only 'train' and 'val' allowed")
+    
+    def _load_jsons(self):
+        with open(os.path.join(self.root, "ILSVRC2012_class_index.json"), "rb") as f:
+            json_file = json.load(f)
+            for class_id, v in json_file.items():
+                self.syn_to_class[v[0]] = int(class_id)
+        with open(os.path.join(self.root, "ILSVRC2012_val_labels.json"), "rb") as f:
+            self.val_to_syn = json.load(f)
+
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        x = Image.open(self.samples[idx]).convert("RGB")
+        if self.transform:
+            x = self.transform(x)
+        return x, self.targets[idx]
+
+class ImageDepthDataset(ImageNetDataset):
+    def _load_jsons(self):
+        with open(os.path.join(self.root, "ILSVRC2012_class_index.json"), "rb") as f:
+            json_file = json.load(f)
+            for class_id, v in json_file.items():
+                self.syn_to_class[v[0]] = int(class_id)
+        with open(os.path.join(self.root, "ILSVRC2012_val_labels.json"), "rb") as f:
+            self.val_to_syn = json.load(f)
+        self.val_to_syn = {key.replace(".JPEG","-dpt_swin2_large_384.png") : val for key,val in self.val_to_syn.items()}
+    
+    def __getitem__(self, idx):
+        x = Image.open(self.samples[idx]).convert('L')
+        x = Image.fromarray(np.stack((x,x,x),axis=2)).convert('RGB')
+        if self.transform:
+            x = self.transform(x)
+        return x, self.targets[idx]
+
+def get_pytorch_imagedepth_train_loader(depth_image=False):
+    if depth_image:
+        dataset = ImageDepthDataset
+    else:
+        dataset = ImageNetDataset
+    def imagedepth_train_loader(data_path, batch_size, workers=5, _worker_init_fn=None, input_size=224):
+        train_dataset = dataset(root=data_path,
+                                        split="train", 
+                                        transform=transforms.Compose([
+                                                    transforms.RandomResizedCrop(input_size),
+                                                    transforms.RandomHorizontalFlip(),
+                                                    ]))
+
+        if torch.distributed.is_initialized():
+            train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+        else:
+            train_sampler = None
+
+        train_loader = torch.utils.data.DataLoader(
+                train_dataset, batch_size=batch_size, shuffle=(train_sampler is None),
+                num_workers=workers, worker_init_fn=_worker_init_fn, pin_memory=True, sampler=train_sampler, collate_fn=fast_collate)
+
+        return PrefetchedWrapper(train_loader), len(train_loader)
+    return imagedepth_train_loader
+def get_pytorch_imagedepth_val_loader(depth_image=False):
+    if depth_image:
+        dataset = ImageDepthDataset
+    else:
+        dataset = ImageNetDataset
+    def imagedepth_val_loader(data_path, batch_size, workers=5, _worker_init_fn=None, input_size=224):
+        val_dataset = dataset(root=data_path,
+                                    split="val",
+                                    transform=transforms.Compose([
+                                                transforms.Resize(int(input_size / 0.875)),
+                                                transforms.CenterCrop(input_size),
+                                                ]))
+
+        if torch.distributed.is_initialized():
+            val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset)
+        else:
+            val_sampler = None
+
+        val_loader = torch.utils.data.DataLoader(
+                val_dataset,
+                sampler=val_sampler,
+                batch_size=batch_size, shuffle=False,
+                num_workers=workers, worker_init_fn=_worker_init_fn, pin_memory=True,
+                collate_fn=fast_collate)
+
+        return PrefetchedWrapper(val_loader), len(val_loader)
+    return imagedepth_val_loader
