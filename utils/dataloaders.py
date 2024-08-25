@@ -4,7 +4,7 @@ import numpy as np
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 
-DATA_BACKEND_CHOICES = ['pytorch', 'pytorch-imagedepth']
+DATA_BACKEND_CHOICES = ['pytorch', 'pytorch-imagedepth', 'ffcv-imagenet']
 try:
     from nvidia.dali.plugin.pytorch import DALIClassificationIterator
     from nvidia.dali.pipeline import Pipeline
@@ -357,6 +357,7 @@ def get_pytorch_imagedepth_train_loader(depth_image=False):
 
         return PrefetchedWrapper(train_loader), len(train_loader)
     return imagedepth_train_loader
+
 def get_pytorch_imagedepth_val_loader(depth_image=False):
     if depth_image:
         dataset = ImageDepthDataset

@@ -28,6 +28,8 @@ from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 from utils.dataloaders import *
 from tensorboardX import SummaryWriter
 
+torch.autograd.set_detect_anomaly(True)
+
 default_model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
@@ -194,6 +196,16 @@ def main():
         depth_image = True if "ILSVRC_DEPTH" in args.data else False
         get_train_loader = get_pytorch_imagedepth_train_loader(depth_image)
         get_val_loader = get_pytorch_imagedepth_val_loader(depth_image)
+    elif args.data_backend == 'ffcv-imagenet':
+        try:
+            from ffcv_training.Dataloaders.dataloaders import get_ffcv_dataloader
+        except ImportError as e:
+            raise Exception("Load and install required submodules and dependencies", e)
+
+        def get_train_loader(data_path, batch_size, workers, input_size):
+            return get_ffcv_dataloader(data_path +"/train.beton", "train", batch_size, workers, input_size)
+        def get_val_loader(data_path, batch_size, workers, input_size):
+            return get_ffcv_dataloader(data_path +"/val.beton", "val", batch_size, workers, input_size)
 
     train_loader, train_loader_len = get_train_loader(args.data, args.batch_size, workers=args.workers, input_size=args.input_size)
     val_loader, val_loader_len = get_val_loader(args.data, args.batch_size, workers=args.workers, input_size=args.input_size)

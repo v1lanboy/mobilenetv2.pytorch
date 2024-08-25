@@ -2,3 +2,6 @@
         path = utils/progress
         url = https://github.com/verigak/progress.git
 
+[submodule "ffcv_training"]
+	path = ffcv_training
+	url = https://github.com/v1lanboy/ffcv_training.git
